@@ -1,0 +1,11 @@
+{
+  "mode": "RECIP",
+  "tau_ms": 100,
+  "min_interval_frac": 0.25,
+  "timebase_ppm": 0.0,
+  "adc": {
+    "gain": 16,
+    "rate_sps": 20,
+    "mains_reject": true
+  }
+}
