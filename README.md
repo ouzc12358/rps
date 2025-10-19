@@ -13,6 +13,23 @@ pip install -e .[dev,plot]
 - Core dependencies: `numpy`, `pandas`, `typer`.
 - Optional plotting extras (`[plot]`) enable PNG outputs via `matplotlib`.
 
+### TERPS Host Quick Start
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .[dev,plot,terps]
+terps-host run --port /dev/ttyACM0 --config host_pi/config.json --set output_csv=run.csv
+```
+
+Use `--set frame_format=binary` once the Pico 2 firmware is streaming binary frames reliably.
+
+Replay the bundled sample frames to sanity-check the pipeline:
+
+```bash
+cat samples/sample_frames.bin | terps-host --port - --frame-format binary --set output_csv=replay.csv
+```
+
 ## Input Format
 
 Provide a CSV file with the following columns:

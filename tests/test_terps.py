@@ -21,7 +21,7 @@ def test_load_config_overrides(tmp_path: Path) -> None:
           "frame_format": "csv",
           "sensor_poly": {
             "X": 30000,
-            "Y": 0.6,
+            "Y": 600000,
             "K": [[0,0,0,0,0],[0,0,0,0,0],[0,0,0,0,0],[0,0,0,0,0],[0,0,0,0,0],[0,0,0,0,0]]
           }
         }
@@ -68,8 +68,7 @@ def test_parse_binary_frame() -> None:
         + mode.to_bytes(1, "little")
     )
     crc = crc16_ccitt(body).to_bytes(2, "little")
-    payload = body + crc
-    packet = b"\x55\xAA" + len(payload).to_bytes(2, "little") + payload
+    packet = b"\x55\xAA" + bytes([len(body)]) + body + crc
     frames = list(parser.parse_binary([packet]))
     assert len(frames) == 1
     frame = frames[0]
@@ -81,19 +80,28 @@ def test_parse_binary_frame() -> None:
 def test_pressure_calculator_linear() -> None:
     sensor_poly = SensorPoly(
         X=30000.0,
-        Y=0.6,
+        Y=600000.0,
         K=[
-            [0.0, 0.0, 0.0, 0.0, 0.0],
-            [1.0, 0.0, 0.0, 0.0, 0.0],
-            [0.0, 0.0, 0.0, 0.0, 0.0],
-            [0.0, 0.0, 0.0, 0.0, 0.0],
-            [0.0, 0.0, 0.0, 0.0, 0.0],
-            [0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
         ],
     )
     calc = PressureCalculator(sensor_poly)
-    pressure = calc.evaluate(30001.0, 0.6)
+    pressure = calc.evaluate(30001.0, 600000.0)
     assert np.isclose(pressure, 1.0)
+
+
+def test_pressure_calculator_microvolt_baseline() -> None:
+    sensor_poly = SensorPoly(
+        X=30000.0,
+        Y=600000.0,
+        K=[
+            [0.0, 0.0, 1.0],
+        ],
+    )
+    calc = PressureCalculator(sensor_poly)
+    pressure = calc.evaluate(30000.0, 600123.0)
+    assert np.isclose(pressure, 123.0**2)
 
 
 def test_sample_pipeline_logs(tmp_path: Path) -> None:
@@ -114,3 +122,30 @@ def test_sample_pipeline_logs(tmp_path: Path) -> None:
     pipeline.close()
     assert len(samples) == 1
     assert cfg.output_csv.exists()
+
+def test_sample_pipeline_microvolt_frame(tmp_path: Path) -> None:
+    cfg = load_config(Path("host_pi/config.json"))
+    cfg.output_csv = tmp_path / "microvolt.csv"
+    cfg.sensor_poly = SensorPoly(
+        X=30000.0,
+        Y=600000.0,
+        K=[
+            [0.0, 1.0],
+            [0.0, 0.0],
+        ],
+    )
+    pipeline = SamplePipeline(cfg)
+    frame = Frame(
+        ts_ms=10.0,
+        f_hz=cfg.sensor_poly.X,
+        tau_ms=cfg.tau_ms,
+        v_uV=600123.0,
+        adc_gain=cfg.adc.gain,
+        flags=0,
+        ppm_corr=cfg.timebase_ppm,
+        mode=cfg.mode,
+    )
+    samples = pipeline.process([frame])
+    pipeline.close()
+    assert len(samples) == 1
+    assert np.isclose(samples[0].pressure, 123.0)

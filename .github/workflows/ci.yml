@@ -4,22 +4,44 @@ on:
   push:
     branches: [ main ]
   pull_request:
+    branches: [ main ]
 
 jobs:
-  lint-test:
+  python:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
       - name: Install dependencies
         run: |
-          pip install --upgrade pip
-          pip install -e .[dev,plot]
-      - name: Ruff
-        run: ruff check .
-      - name: Black
-        run: black --check .
-      - name: Pytest
+          python -m pip install --upgrade pip
+          pip install -e .[dev,plot,terps]
+      - name: Lint
+        run: ruff check src/bslfs/terps
+      - name: Type check
+        run: mypy src/bslfs/terps
+      - name: Tests
         run: pytest -q
+
+  firmware:
+    runs-on: ubuntu-latest
+    env:
+      PICO_SDK_PATH: ${{ runner.temp }}/pico-sdk
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build gcc-arm-none-eabi libnewlib-arm-none-eabi
+      - name: Fetch pico-sdk
+        run: |
+          git clone --depth 1 https://github.com/raspberrypi/pico-sdk.git "$PICO_SDK_PATH"
+          (cd "$PICO_SDK_PATH" && git submodule update --init)
+      - name: Configure
+        run: |
+          cmake -S firmware_pico2 -B firmware_pico2/build -G Ninja -DPICO_SDK_PATH=$PICO_SDK_PATH
+      - name: Build
+        run: cmake --build firmware_pico2/build -j

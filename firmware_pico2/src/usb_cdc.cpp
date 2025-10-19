@@ -1,10 +1,139 @@
 #include "usb_cdc.h"
 
-void usb_cdc_init(void) {
-    // TODO: Initialize TinyUSB CDC and queue structures.
+#include <stdio.h>
+#include <string.h>
+
+#include "pico/stdlib.h"
+#include "pico/time.h"
+#include "tusb.h"
+
+static terps_stream_mode_t g_mode = TERPS_STREAM_BINARY;
+
+
+static bool ensure_write_capacity(uint32_t needed_bytes, uint32_t timeout_ms)
+{
+    uint32_t start = to_ms_since_boot(get_absolute_time());
+    while (tud_cdc_connected()) {
+        uint32_t available = tud_cdc_write_available();
+        if (available >= needed_bytes) {
+            return true;
+        }
+        tud_task();
+        sleep_ms(1);
+        if (to_ms_since_boot(get_absolute_time()) - start > timeout_ms) {
+            return false;
+        }
+    }
+    return false;
+}
+static uint16_t crc16_ccitt(const uint8_t *data, size_t len)
+{
+    uint16_t crc = 0xFFFF;
+    for (size_t i = 0; i < len; ++i) {
+        crc ^= (uint16_t)data[i] << 8;
+        for (int b = 0; b < 8; ++b) {
+            if (crc & 0x8000) {
+                crc = (uint16_t)((crc << 1) ^ 0x1021);
+            } else {
+                crc <<= 1;
+            }
+        }
+    }
+    return crc;
 }
 
-void usb_cdc_send_frame(const terps_frame_t* frame) {
-    (void)frame;
-    // TODO: Serialize as CSV or binary and push to USB FIFO.
+void usb_cdc_init(terps_stream_mode_t mode)
+{
+    g_mode = mode;
+}
+
+void usb_cdc_set_mode(terps_stream_mode_t mode)
+{
+    g_mode = mode;
+}
+
+static bool cdc_wait_ready(void)
+{
+    uint32_t start = to_ms_since_boot(get_absolute_time());
+    while (!tud_cdc_connected()) {
+        tud_task();
+        sleep_ms(5);
+        if (to_ms_since_boot(get_absolute_time()) - start > 2000) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool usb_cdc_send_frame(const terps_frame_t *frame)
+{
+    if (frame == NULL) {
+        return false;
+    }
+    if (!cdc_wait_ready()) {
+        return false;
+    }
+
+    if (g_mode == TERPS_STREAM_BINARY) {
+        uint8_t payload[19];
+        size_t offset = 0;
+        memcpy(&payload[offset], &frame->ts_ms, sizeof(frame->ts_ms));
+        offset += sizeof(frame->ts_ms);
+        memcpy(&payload[offset], &frame->f_hz_x1e4, sizeof(frame->f_hz_x1e4));
+        offset += sizeof(frame->f_hz_x1e4);
+        memcpy(&payload[offset], &frame->tau_ms, sizeof(frame->tau_ms));
+        offset += sizeof(frame->tau_ms);
+        memcpy(&payload[offset], &frame->diode_uV, sizeof(frame->diode_uV));
+        offset += sizeof(frame->diode_uV);
+        payload[offset++] = frame->adc_gain;
+        payload[offset++] = frame->flags;
+        memcpy(&payload[offset], &frame->ppm_corr_x1e2, sizeof(frame->ppm_corr_x1e2));
+        offset += sizeof(frame->ppm_corr_x1e2);
+        payload[offset++] = frame->mode;
+
+        const uint8_t header[3] = {0x55, 0xAA, (uint8_t)offset};
+        const uint16_t crc = crc16_ccitt(payload, offset);
+        uint8_t crc_bytes[2];
+        memcpy(crc_bytes, &crc, sizeof(crc));
+
+        uint32_t total_len = sizeof(header) + (uint32_t)offset + sizeof(crc_bytes);
+        if (!ensure_write_capacity(total_len, 100)) {
+            return false;
+        }
+        tud_cdc_write(header, sizeof(header));
+        tud_cdc_write(payload, offset);
+        tud_cdc_write(crc_bytes, sizeof(crc_bytes));
+        tud_cdc_write_flush();
+        return true;
+    }
+
+    char line[160];
+    const char *mode_str = frame->mode == 0 ? "GATED" : "RECIP";
+    int written = snprintf(
+        line,
+        sizeof(line),
+        "%lu,%.4f,%u,%.1f,%u,%u,%.2f,%s\r\n",
+        (unsigned long)frame->ts_ms,
+        frame->f_hz,
+        frame->tau_ms,
+        frame->diode_uV / 1.0f,
+        frame->adc_gain,
+        frame->flags,
+        frame->ppm_corr,
+        mode_str);
+
+    if (written <= 0) {
+        return false;
+    }
+    if (!ensure_write_capacity((uint32_t)written, 100)) {
+        return false;
+    }
+    tud_cdc_write(line, (uint32_t)written);
+    tud_cdc_write_flush();
+    return true;
+}
+
+void usb_cdc_poll(void)
+{
+    tud_task();
 }

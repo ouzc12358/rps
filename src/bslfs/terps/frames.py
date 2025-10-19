@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import csv
 import enum
-import io
+import logging
 import struct
 from dataclasses import dataclass
-from typing import Iterable, Iterator, Optional, TextIO
+from typing import Any, Dict, Iterable, Iterator, Optional
+
+
+FLAG_SYNC_ACTIVE = 0x01
+FLAG_ADC_TIMEOUT = 0x02
+FLAG_PPS_LOCKED = 0x04
+FLAG_ADC_SATURATED = 0x08
 
 
 class FrameFormat(str, enum.Enum):
@@ -47,12 +53,16 @@ class FrameParser:
     def __init__(self, fmt: FrameFormat):
         self.fmt = fmt
         self._buffer = bytearray()
+        self._stats: Dict[str, int] = {"frames": 0, "crc_errors": 0, "length_errors": 0}
+        self._payload_len = struct.calcsize("<IiHiBBhB")
+        self._log = logging.getLogger(__name__)
 
     def parse_csv(self, lines: Iterable[str]) -> Iterator[Frame]:
         reader = csv.DictReader(lines)
         for row in reader:
             if not row:
                 continue
+            self._stats["frames"] += 1
             yield Frame(
                 ts_ms=float(row["ts_ms"]),
                 f_hz=float(row["f_hz"]),
@@ -78,23 +88,33 @@ class FrameParser:
             if start < 0:
                 self._buffer.clear()
                 break
-            if len(self._buffer) < start + 4:
+            if len(self._buffer) < start + 3:
                 # Insufficient length to read frame len
                 break
-            length = struct.unpack_from("<H", self._buffer, start + 2)[0]
-            frame_end = start + 4 + length
+            length = self._buffer[start + 2]
+            frame_end = start + 3 + length + 2  # payload + CRC16
             if len(self._buffer) < frame_end:
                 break
-            payload = bytes(self._buffer[start + 4 : frame_end])
-            crc_expected = struct.unpack_from("<H", payload, len(payload) - 2)[0]
-            body = payload[:-2]
+            if length != self._payload_len:
+                self._stats["length_errors"] += 1
+                self._log.debug("Discarding frame with unexpected payload length: %s", length)
+                del self._buffer[:frame_end]
+                continue
+            payload = bytes(self._buffer[start + 3 : start + 3 + length])
+            crc_expected = struct.unpack_from("<H", self._buffer, frame_end - 2)[0]
+            body = payload
             crc_actual = crc16_ccitt(body)
             if crc_actual != crc_expected:
                 # Drop the corrupted frame
+                self._stats["crc_errors"] += 1
+                self._log.debug(
+                    "CRC mismatch (expected=%04X, actual=%04X)", crc_expected, crc_actual
+                )
                 del self._buffer[: frame_end]
                 continue
             frame = self._decode_body(body)
             if frame:
+                self._stats["frames"] += 1
                 yield frame
             del self._buffer[: frame_end]
 
@@ -134,8 +154,14 @@ class FrameParser:
             return self.parse_csv(source)  # type: ignore[arg-type]
         return self.parse_binary(source)  # type: ignore[arg-type]
 
+    def stats(self) -> Dict[str, int]:
+        return dict(self._stats)
 
-def iterate_text_stream(handle: TextIO) -> Iterator[str]:
+    def reset(self) -> None:
+        self._buffer.clear()
+
+
+def iterate_text_stream(handle: Iterable[str]) -> Iterator[str]:
     for line in handle:
         line = line.strip()
         if not line or line.startswith("#"):
@@ -143,7 +169,7 @@ def iterate_text_stream(handle: TextIO) -> Iterator[str]:
         yield line
 
 
-def iterate_binary_stream(handle: io.BufferedReader, chunk_size: int = 256) -> Iterator[bytes]:
+def iterate_binary_stream(handle: Any, chunk_size: int = 256) -> Iterator[bytes]:
     while True:
         chunk = handle.read(chunk_size)
         if not chunk:

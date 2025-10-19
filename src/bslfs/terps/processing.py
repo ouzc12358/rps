@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, TextIO
 
 import numpy as np
 
@@ -35,12 +35,17 @@ class PressureCalculator:
     def __init__(self, sensor_poly: SensorPoly):
         self.sensor_poly = sensor_poly
         self._k = np.array(sensor_poly.K, dtype=float)
+        if self._k.ndim != 2 or self._k.size == 0:
+            raise ValueError("sensor_poly.K must be a non-empty 2D matrix")
+        self._rows, self._cols = self._k.shape
 
     def evaluate(self, frequency_hz: float, diode_uV: float) -> float:
         x = frequency_hz - self.sensor_poly.X
         y = diode_uV - self.sensor_poly.Y
-        x_powers = np.array([x**i for i in range(self._k.shape[0])], dtype=float)
-        y_powers = np.array([y**j for j in range(self._k.shape[1])], dtype=float)
+        x_indices = np.arange(self._rows, dtype=float)
+        y_indices = np.arange(self._cols, dtype=float)
+        x_powers = np.power(x, x_indices, dtype=float)
+        y_powers = np.power(y, y_indices, dtype=float)
         return float(np.sum(self._k * np.outer(x_powers, y_powers)))
 
 
@@ -52,8 +57,8 @@ class CsvLogger:
 
     def __init__(self, path: Path):
         self.path = path
-        self._handle: Optional[csv.DictWriter] = None
-        self._file_handle = None
+        self._handle: Optional[csv.DictWriter[str]] = None
+        self._file_handle: Optional[TextIO] = None
 
     def append(self, sample: SampleRecord) -> None:
         if self._handle is None:
@@ -74,7 +79,8 @@ class CsvLogger:
             self._handle.writeheader()
         assert self._handle is not None
         self._handle.writerow(sample.__dict__)
-        self._file_handle.flush()  # type: ignore[union-attr]
+        if self._file_handle is not None:
+            self._file_handle.flush()
 
     def close(self) -> None:
         if self._file_handle:

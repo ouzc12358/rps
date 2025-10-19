@@ -14,23 +14,42 @@ class AdcConfig:
 
 
 @dataclass
+class HostRuntime:
+    queue_maxsize: int = 512
+    reconnect_initial_sec: float = 0.5
+    reconnect_max_sec: float = 5.0
+    stats_log_interval: float = 60.0
+    binary_chunk_size: int = 256
+
+
+@dataclass
 class SensorPoly:
     X: float
     Y: float
-    K: List[List[float]]  # 6x5 matrix by convention
+    K: List[List[float]]
 
     @staticmethod
     def from_mapping(data: Dict[str, Any]) -> "SensorPoly":
+        if "X" not in data or "Y" not in data or "K" not in data:
+            raise ValueError("sensor_poly requires fields 'X', 'Y', and 'K'")
         k_matrix = data.get("K") or []
-        if len(k_matrix) != 6:
-            raise ValueError("sensor_poly.K must contain 6 rows")
+        if not isinstance(k_matrix, list) or not k_matrix:
+            raise ValueError("sensor_poly.K must be a non-empty 2D list")
+        first_len = None
+        normalized: List[List[float]] = []
         for row in k_matrix:
-            if len(row) != 5:
-                raise ValueError("sensor_poly.K rows must contain 5 columns")
+            if not isinstance(row, list) or not row:
+                raise ValueError("sensor_poly.K rows must be non-empty lists")
+            row_len = len(row)
+            if first_len is None:
+                first_len = row_len
+            elif row_len != first_len:
+                raise ValueError("sensor_poly.K rows must have identical length")
+            normalized.append([float(value) for value in row])
         return SensorPoly(
             X=float(data["X"]),
             Y=float(data["Y"]),
-            K=[[float(value) for value in row] for row in k_matrix],
+            K=normalized,
         )
 
 
@@ -44,9 +63,10 @@ class TerpsConfig:
     output_csv: Path | None = None
     adc: AdcConfig = field(default_factory=AdcConfig)
     sensor_poly: SensorPoly = field(
-        default_factory=lambda: SensorPoly(X=30000.0, Y=0.6, K=[[0.0] * 5 for _ in range(6)])
+        default_factory=lambda: SensorPoly(X=30000.0, Y=600000.0, K=[[0.0] * 5 for _ in range(6)])
     )
     allan_window: int = 0  # optional sample count for Allan deviation
+    host: HostRuntime = field(default_factory=HostRuntime)
 
     @property
     def frame_format_enum(self) -> str:
@@ -85,6 +105,13 @@ def load_config(path: Path | str, overrides: Sequence[str] | None = None) -> Ter
         key, raw_value = _parse_override(override)
         _assign_nested(override_data, key, raw_value)
     merged = _merge(data, override_data)
+    default_poly_data = {
+        "X": 30000.0,
+        "Y": 600000.0,
+        "K": [[0.0] * 5 for _ in range(6)],
+    }
+    sensor_poly_data = merged.get("sensor_poly") or default_poly_data
+    host_data = merged.get("host") or {}
     return TerpsConfig(
         mode=merged.get("mode", "RECIP"),
         tau_ms=float(merged.get("tau_ms", 100.0)),
@@ -97,8 +124,15 @@ def load_config(path: Path | str, overrides: Sequence[str] | None = None) -> Ter
             rate_sps=int(merged.get("adc", {}).get("rate_sps", 20)),
             mains_reject=bool(merged.get("adc", {}).get("mains_reject", True)),
         ),
-        sensor_poly=SensorPoly.from_mapping(merged.get("sensor_poly", {})),
+        sensor_poly=SensorPoly.from_mapping(sensor_poly_data),
         allan_window=int(merged.get("allan_window", 0)),
+        host=HostRuntime(
+            queue_maxsize=int(host_data.get("queue_maxsize", 512)),
+            reconnect_initial_sec=float(host_data.get("reconnect_initial_sec", 0.5)),
+            reconnect_max_sec=float(host_data.get("reconnect_max_sec", 5.0)),
+            stats_log_interval=float(host_data.get("stats_log_interval", 60.0)),
+            binary_chunk_size=int(host_data.get("binary_chunk_size", 256)),
+        ),
     )
 
 

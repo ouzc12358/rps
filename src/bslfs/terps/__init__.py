@@ -7,12 +7,15 @@ helpers used by the Raspberry Pi host application. Keeping this logic inside
 introducing a parallel package.
 """
 
-from .config import TerpsConfig, load_config
+from .config import AdcConfig, HostRuntime, SensorPoly, TerpsConfig, load_config
 from .frames import Frame, FrameFormat, FrameParser, crc16_ccitt
 from .processing import PressureCalculator, SampleRecord
 from .runner import TerpsHost
 
 __all__ = [
+    "AdcConfig",
+    "HostRuntime",
+    "SensorPoly",
     "TerpsConfig",
     "load_config",
     "Frame",
