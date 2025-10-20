@@ -7,7 +7,7 @@
 #include "pico/time.h"
 #include "tusb.h"
 
-static terps_stream_mode_t g_mode = TERPS_STREAM_BINARY;
+static terps_stream_mode_t g_mode = TERPS_STREAM_CSV;
 
 
 static bool ensure_write_capacity(uint32_t needed_bytes, uint32_t timeout_ms)

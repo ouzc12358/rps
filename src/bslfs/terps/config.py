@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 
 @dataclass
@@ -66,6 +66,7 @@ class TerpsConfig:
         default_factory=lambda: SensorPoly(X=30000.0, Y=600000.0, K=[[0.0] * 5 for _ in range(6)])
     )
     allan_window: int = 0  # optional sample count for Allan deviation
+    temp_poly: Optional[List[float]] = None
     host: HostRuntime = field(default_factory=HostRuntime)
 
     @property
@@ -112,6 +113,10 @@ def load_config(path: Path | str, overrides: Sequence[str] | None = None) -> Ter
     }
     sensor_poly_data = merged.get("sensor_poly") or default_poly_data
     host_data = merged.get("host") or {}
+    temp_poly_data = merged.get("temp_poly")
+    temp_poly = None
+    if isinstance(temp_poly_data, list):
+        temp_poly = [float(value) for value in temp_poly_data]
     return TerpsConfig(
         mode=merged.get("mode", "RECIP"),
         tau_ms=float(merged.get("tau_ms", 100.0)),
@@ -126,6 +131,7 @@ def load_config(path: Path | str, overrides: Sequence[str] | None = None) -> Ter
         ),
         sensor_poly=SensorPoly.from_mapping(sensor_poly_data),
         allan_window=int(merged.get("allan_window", 0)),
+        temp_poly=temp_poly,
         host=HostRuntime(
             queue_maxsize=int(host_data.get("queue_maxsize", 512)),
             reconnect_initial_sec=float(host_data.get("reconnect_initial_sec", 0.5)),

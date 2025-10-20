@@ -14,6 +14,7 @@ terps-host run --port /dev/ttyACM0 --config host_pi/config.json --set output_csv
 Start with CSV output for readability; switch to `--set frame_format=binary` once the firmware
 path is validated. Use `--port -` to replay synthetic frames from stdin during bench testing.
 Add `--plot` to open a Matplotlib 2×2 dashboard（左上=压力、右上=温度代理、左下=频率、右下=二极管电压）。
+On Raspberry Pi desktops install Tk first (`sudo apt install python3-tk`) so the window can open.
 
 ## Setup
 
@@ -149,6 +150,15 @@ ts_ms,f_hz,tau_ms,v_uV,adc_gain,flags,ppm_corr,mode
 | `0p003` | RECIP | 2000 | ×32 | 20 | 0.003% FS（OCXO/GPSDO）|
 
 示例：`terps-host run --preset 0p02 --port /dev/ttyACM0 --set output_csv=run.csv`
+
+### 绘图与温度选项
+
+- `--plot`：启动 2×2 实时仪表板（依赖 `pip install -e .[plot]`）。
+- `--plot-snapshot-every <秒>`：周期性保存 PNG 截图到 `--out` 路径所在的目录（0 表示关闭）。
+- `--temp-mode linear|poly|off`：温度代理模式（默认 `off`）。
+  - 线性模式使用 `--temp-linear-v0-uV` 和 `--temp-linear-slope-uV-per-C`（默认 600000 µV 与 -2000 µV/°C）。
+  - 多项式模式从 `config.json` 中的 `temp_poly` 读取系数 `[a0, a1, ...]`，自变量单位为 µV。
+  - `--temp-mode off` 时右上角曲线固定为 0。
 
 ## Tooling
 

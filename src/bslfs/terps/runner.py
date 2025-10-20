@@ -311,6 +311,10 @@ def run(
         help="Apply preset (0p02|0p01|0p003) before other overrides.",
     ),
     plot: bool = typer.Option(False, "--plot", help="Show realtime 2x2 Matplotlib dashboard."),
+    plot_snapshot_every: float = typer.Option(0.0, "--plot-snapshot-every", help="Save PNG every N seconds (0=off)."),
+    temp_mode: str = typer.Option("off", "--temp-mode", help="Temperature proxy mode: off|linear|poly."),
+    temp_linear_v0_uv: float = typer.Option(600000.0, "--temp-linear-v0-uV", help="Linear mode reference voltage in µV."),
+    temp_linear_slope_uv_per_c: float = typer.Option(-2000.0, "--temp-linear-slope-uV-per-C", help="Linear mode slope (µV/°C)."),
     override: Optional[list[str]] = typer.Option(
         None,
         "--set",
@@ -333,11 +337,35 @@ def run(
             from .plotting import LivePlotter
         except ImportError as exc:
             raise typer.BadParameter("Matplotlib is required for --plot (pip install .[plot])") from exc
-        plotter = LivePlotter(baseline_uv=cfg.sensor_poly.Y)
-        logger.info("Live plot enabled (window=%d samples)", 500)
+        baseline_uv = cfg.sensor_poly.Y
+        snapshot_dir = None
+        if plot_snapshot_every > 0:
+            if cfg.output_csv:
+                snapshot_dir = Path(cfg.output_csv).resolve().parent
+            else:
+                snapshot_dir = Path.cwd() / "plot_snapshots"
+        plotter = LivePlotter(
+            baseline_uv=baseline_uv,
+            temp_mode=temp_mode.lower(),
+            temp_linear_v0=temp_linear_v0_uv,
+            temp_linear_slope=temp_linear_slope_uv_per_c,
+            temp_poly=cfg.temp_poly,
+            snapshot_every=plot_snapshot_every,
+            snapshot_dir=snapshot_dir,
+        )
+        logger.info("Live plot enabled (tau=%.1f ms, mode=%s)", cfg.tau_ms, temp_mode)
     if preset:
         logger.info("Applied preset %s (tau_ms=%.1f, adc_gain=%d, rate_sps=%d)",
                     preset.lower(), cfg.tau_ms, cfg.adc.gain, cfg.adc.rate_sps)
     settings = SerialSettings(port=port, baudrate=baudrate, timeout=timeout)
     host = TerpsHost(settings=settings, config=cfg, plotter=plotter)
-    host.run()
+    try:
+        host.run()
+    except KeyboardInterrupt:
+        logger.info("Stopping host (Ctrl+C)")
+    finally:
+        if plotter is not None:
+            try:
+                plotter.close()  # 关闭 Matplotlib 线程/窗口，避免残留
+            except Exception:
+                pass

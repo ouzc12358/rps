@@ -23,6 +23,7 @@ terps-host run --port /dev/ttyACM0 --config host_pi/config.json --set output_csv
 ```
 
 Use `--set frame_format=binary` once the Pico 2 firmware is streaming binary frames reliably.
+On Raspberry Pi desktop sessions install the Tk backend first (`sudo apt install python3-tk`) so Matplotlib windows can open.
 
 Replay the bundled sample frames to sanity-check the pipeline:
 
@@ -31,6 +32,10 @@ cat samples/sample_frames.bin | terps-host --port - --frame-format binary --set 
 ```
 
 Add `--plot` to open a realtime Matplotlib dashboard (requires `pip install -e .[plot]`).
+Extra controls:
+
+- `--plot-snapshot-every 10` saves PNGs beside `--out` every 10 seconds.
+- `--temp-mode linear|poly|off` controls the upper-right temperature proxy (`--temp-linear-v0-uV`, `--temp-linear-slope-uV-per-C`, `temp_poly` in config drive conversions).
 
 ## Input Format
 
