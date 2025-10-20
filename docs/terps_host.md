@@ -13,6 +13,7 @@ terps-host run --port /dev/ttyACM0 --config host_pi/config.json --set output_csv
 
 Start with CSV output for readability; switch to `--set frame_format=binary` once the firmware
 path is validated. Use `--port -` to replay synthetic frames from stdin during bench testing.
+Add `--plot` to open a Matplotlib 2×2 dashboard（左上=压力、右上=温度代理、左下=频率、右下=二极管电压）。
 
 ## Setup
 
@@ -153,6 +154,7 @@ ts_ms,f_hz,tau_ms,v_uV,adc_gain,flags,ppm_corr,mode
 
 - `host_pi/tools/allan.py`：计算频率序列的 Allan 偏差。
 - `host_pi/tools/plot.py`：快速绘制频率 / 压力随时间曲线。
+- `--plot` 依赖 `matplotlib`（已包含在 `[plot]` extra 中）；启用该开关前请确保运行 `pip install -e .[plot]`。
 
 ## Samples & Replay
 

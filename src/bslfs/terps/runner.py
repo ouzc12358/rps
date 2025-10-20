@@ -7,7 +7,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import typer
 
@@ -21,6 +21,9 @@ from .frames import Frame, FrameFormat, FrameParser, iterate_binary_stream, iter
 from .processing import SamplePipeline
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from .plotting import LivePlotter
 
 
 PRESETS: Dict[str, Dict[str, Any]] = {
@@ -180,11 +183,14 @@ class SerialReaderThread(threading.Thread):
 class TerpsHost:
     """Host-side orchestrator running on Raspberry Pi."""
 
-    def __init__(self, settings: SerialSettings, config: TerpsConfig):
+    def __init__(self, settings: SerialSettings, config: TerpsConfig, plotter: Optional["LivePlotter"] = None):
         self.settings = settings
         self.config = config
         self.frame_format = FrameFormat(config.frame_format_enum)
         self.pipeline = SamplePipeline(config)
+        self.plotter = plotter
+        if self.plotter:
+            self.pipeline.register_callback(self.plotter.on_sample)
 
     def run(self) -> None:
         if self.settings.port == "-":
@@ -239,6 +245,8 @@ class TerpsHost:
                 final_stats.get("dropped", 0),
                 final_stats.get("reconnects", 0),
             )
+            if self.plotter:
+                self.plotter.close()
 
     def _run_from_stream(self) -> None:
         parser = FrameParser(self.frame_format)
@@ -257,6 +265,8 @@ class TerpsHost:
             )
         finally:
             self.pipeline.close()
+            if self.plotter:
+                self.plotter.close()
 
 
 class TextWrapper:
@@ -300,6 +310,7 @@ def run(
         "-P",
         help="Apply preset (0p02|0p01|0p003) before other overrides.",
     ),
+    plot: bool = typer.Option(False, "--plot", help="Show realtime 2x2 Matplotlib dashboard."),
     override: Optional[list[str]] = typer.Option(
         None,
         "--set",
@@ -316,9 +327,17 @@ def run(
         preset_overrides_list = preset_overrides(key)
     combined_overrides = preset_overrides_list + (override or [])
     cfg = load_config(config_path, combined_overrides or None)
+    plotter = None
+    if plot:
+        try:
+            from .plotting import LivePlotter
+        except ImportError as exc:
+            raise typer.BadParameter("Matplotlib is required for --plot (pip install .[plot])") from exc
+        plotter = LivePlotter(baseline_uv=cfg.sensor_poly.Y)
+        logger.info("Live plot enabled (window=%d samples)", 500)
     if preset:
         logger.info("Applied preset %s (tau_ms=%.1f, adc_gain=%d, rate_sps=%d)",
                     preset.lower(), cfg.tau_ms, cfg.adc.gain, cfg.adc.rate_sps)
     settings = SerialSettings(port=port, baudrate=baudrate, timeout=timeout)
-    host = TerpsHost(settings=settings, config=cfg)
+    host = TerpsHost(settings=settings, config=cfg, plotter=plotter)
     host.run()

@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Optional, TextIO
+from typing import Callable, Iterable, List, Optional, TextIO
 
 import numpy as np
 
@@ -98,6 +98,7 @@ class SamplePipeline:
         self.config = config
         self.calculator = PressureCalculator(config.sensor_poly)
         self.logger = CsvLogger(config.output_csv) if config.output_csv else None
+        self._callbacks: List[Callable[[SampleRecord], None]] = []
 
     def process(self, frames: Iterable[Frame]) -> List[SampleRecord]:
         processed: List[SampleRecord] = []
@@ -117,7 +118,12 @@ class SamplePipeline:
             processed.append(sample)
             if self.logger:
                 self.logger.append(sample)
+            for callback in self._callbacks:
+                callback(sample)
         return processed
+
+    def register_callback(self, callback: Callable[[SampleRecord], None]) -> None:
+        self._callbacks.append(callback)
 
     def close(self) -> None:
         if self.logger:

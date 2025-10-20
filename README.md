@@ -30,6 +30,8 @@ Replay the bundled sample frames to sanity-check the pipeline:
 cat samples/sample_frames.bin | terps-host --port - --frame-format binary --set output_csv=replay.csv
 ```
 
+Add `--plot` to open a realtime Matplotlib dashboard (requires `pip install -e .[plot]`).
+
 ## Input Format
 
 Provide a CSV file with the following columns:
