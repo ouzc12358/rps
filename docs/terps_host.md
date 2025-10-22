@@ -44,6 +44,8 @@ terps-host run --port /dev/ttyACM0 --config host_pi/config.json --set output_csv
 - The reader thread auto-reconnects on `SerialException` with exponential backoff (
   configurable via `host.reconnect_initial_sec` / `host.reconnect_max_sec`).
 - Runner logs aggregate statistics every `host.stats_log_interval` 秒（累计帧数、CRC/长度错误、丢帧、重连次数）。
+- Calibration source priority is configurable: `--coeff-source auto|manual|config`（默认 `auto`）。
+  使用 `--coeff-refresh-sec` 控制 EEPROM 轮询周期（仅 CSV 模式有效），配合 `--coeff-manual-json` 可加载手动 JSON 覆盖。
 
 Processed samples (timestamp, frequency, gate length, diode µV, pressure, flags) are persisted to the configured CSV path. `%FS` is defined identically to the analysis tooling: `max(output) - min(output)` over the dataset.
 
@@ -94,6 +96,17 @@ ts_ms,f_hz,tau_ms,v_uV,adc_gain,flags,ppm_corr,mode
 
 > `v_uV` 与 `sensor_poly.Y` 均为微伏 (µV)；固件输出与上位机多项式计算必须保持该单位一致。
 
+CSV 输出会在表头前附加一行校准信息，例如：`# coeff_source=eeprom coeff_order=5 coeff_serial=12345678 unit=Pa`。
+
+### Calibration EEPROM（UNI/O）
+
+- RPS8x00 校准存储在 Microchip 11LC040，使用 UNI/O（SCIO 单线）与 Pico 2 相连。
+- 固件提供 `EEPROM.DUMP <addr> <len>` 与 `INFO.DEV` 文本命令；回复不会打断帧流。
+- `terps-host coeff dump --port /dev/ttyACM0 --out rps_eeprom.bin` 可抓取 512 字节原始镜像；
+  `terps-host coeff parse --in rps_eeprom.bin` 会校验 0x1234 累加和并打印序列号、单位、阶次等信息。
+- 通过 `terps-host coeff set --order N --x-ref ... --y-ref ... --out manual.json <coeff...>` 生成手动 JSON，
+  再配合 `--coeff-manual-json`/`--coeff-source=manual` 覆盖运行时的多项式。
+
 ## Acquisition Presets
 
 | 档位        | 推荐模式 | τ 窗口 (ms) | ADS1220 PGA | 采样率 (SPS) | 时基            | 1PPS | 目标精度 |
@@ -110,6 +123,7 @@ ts_ms,f_hz,tau_ms,v_uV,adc_gain,flags,ppm_corr,mode
 - ADS1220 SPI (Pico2): `SCK GP18`, `MOSI GP19`, `MISO GP16`, `CS GP17`, `DRDY GP20`.
 - Optional SYNC (`Pi GPIO23` → `Pico GP3`) and 1PPS (`GPS→Pico GP21`).
 - Power: Pico via USB; ADS1220 from Pico 3V3 (single point ground).
+- UNI/O 校准线：`SCIO` 接 Pico2 `GP6`，串联 220–470 Ω，外加 4.7 kΩ 上拉至 3V3（无需强上拉）。
 
 **拓扑 B（ADS1220 连接至 Pi）**
 

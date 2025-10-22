@@ -3,10 +3,11 @@ from __future__ import annotations
 import csv
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, List, Optional, TextIO
+from typing import Callable, Dict, Iterable, List, Optional, TextIO
 
 import numpy as np
 
+from .coeff import Coeff, coeff_metadata
 from .config import SensorPoly, TerpsConfig
 from .frames import Frame
 
@@ -59,6 +60,7 @@ class CsvLogger:
         self.path = path
         self._handle: Optional[csv.DictWriter[str]] = None
         self._file_handle: Optional[TextIO] = None
+        self._pending_metadata: List[str] = []
 
     def append(self, sample: SampleRecord) -> None:
         if self._handle is None:
@@ -76,11 +78,29 @@ class CsvLogger:
                 "mode",
             ]
             self._handle = csv.DictWriter(self._file_handle, fieldnames=fieldnames)
+            for line in self._pending_metadata:
+                if self._file_handle is not None:
+                    self._file_handle.write(line + "\n")
+            if self._pending_metadata and self._file_handle is not None:
+                self._file_handle.flush()
+            self._pending_metadata.clear()
             self._handle.writeheader()
         assert self._handle is not None
         self._handle.writerow(sample.__dict__)
         if self._file_handle is not None:
             self._file_handle.flush()
+
+    def set_metadata(self, metadata: Dict[str, str]) -> None:
+        if not metadata:
+            return
+        line = "# " + " ".join(f"{key}={value}" for key, value in metadata.items())
+        if self._handle is None:
+            self._pending_metadata.append(line)
+            return
+        if self._file_handle is None:
+            return
+        self._file_handle.write(line + "\n")
+        self._file_handle.flush()
 
     def close(self) -> None:
         if self._file_handle:
@@ -94,11 +114,16 @@ class SamplePipeline:
     Glue that converts frames into processed samples and optionally logs them.
     """
 
-    def __init__(self, config: TerpsConfig):
+    def __init__(self, config: TerpsConfig, coeff: Coeff):
         self.config = config
-        self.calculator = PressureCalculator(config.sensor_poly)
+        self.coeff = coeff
         self.logger = CsvLogger(config.output_csv) if config.output_csv else None
         self._callbacks: List[Callable[[SampleRecord], None]] = []
+        poly = coeff.as_sensor_poly()
+        self.config.sensor_poly = poly
+        self.calculator = PressureCalculator(poly)
+        if self.logger:
+            self.logger.set_metadata(coeff_metadata(coeff))
 
     def process(self, frames: Iterable[Frame]) -> List[SampleRecord]:
         processed: List[SampleRecord] = []
@@ -118,12 +143,20 @@ class SamplePipeline:
             processed.append(sample)
             if self.logger:
                 self.logger.append(sample)
-            for callback in self._callbacks:
-                callback(sample)
+        for callback in self._callbacks:
+            callback(sample)
         return processed
 
     def register_callback(self, callback: Callable[[SampleRecord], None]) -> None:
         self._callbacks.append(callback)
+
+    def update_coeff(self, coeff: Coeff) -> None:
+        self.coeff = coeff
+        poly = coeff.as_sensor_poly()
+        self.config.sensor_poly = poly
+        self.calculator = PressureCalculator(poly)
+        if self.logger:
+            self.logger.set_metadata(coeff_metadata(coeff))
 
     def close(self) -> None:
         if self.logger:

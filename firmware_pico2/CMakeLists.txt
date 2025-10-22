@@ -16,6 +16,8 @@ add_executable(terps_pico2
     src/ads1220.cpp
     src/usb_cdc.cpp
     src/pps_cal.cpp
+    src/uni_o.cpp
+    src/eeprom_coeff.c
 )
 
 target_include_directories(terps_pico2 PUBLIC include)

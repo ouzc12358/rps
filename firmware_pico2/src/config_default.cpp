@@ -21,4 +21,6 @@ const terps_firmware_config_t terps_default_config = {
     .spi_miso_gpio = 16,
     .adc_timeout_ms = 200,
     .debug_deglitch_stats = false,
+    .unio_gpio = 6,
+    .unio_bitrate_bps = 40000,
 };

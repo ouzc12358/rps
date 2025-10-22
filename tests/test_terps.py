@@ -4,6 +4,7 @@ from pathlib import Path
 
 import numpy as np
 
+from bslfs.terps.coeff import coeff_from_sensor_poly
 from bslfs.terps.config import SensorPoly, TerpsConfig, load_config
 from bslfs.terps.frames import Frame, FrameFormat, FrameParser, crc16_ccitt
 from bslfs.terps.processing import PressureCalculator, SamplePipeline
@@ -107,7 +108,8 @@ def test_pressure_calculator_microvolt_baseline() -> None:
 def test_sample_pipeline_logs(tmp_path: Path) -> None:
     cfg = load_config(Path("host_pi/config.json"))
     cfg.output_csv = tmp_path / "out.csv"
-    pipeline = SamplePipeline(cfg)
+    coeff = coeff_from_sensor_poly("test", cfg.sensor_poly)
+    pipeline = SamplePipeline(cfg, coeff)
     frame = Frame(
         ts_ms=1.0,
         f_hz=cfg.sensor_poly.X,
@@ -134,7 +136,8 @@ def test_sample_pipeline_microvolt_frame(tmp_path: Path) -> None:
             [0.0, 0.0],
         ],
     )
-    pipeline = SamplePipeline(cfg)
+    coeff = coeff_from_sensor_poly("test", cfg.sensor_poly)
+    pipeline = SamplePipeline(cfg, coeff)
     frame = Frame(
         ts_ms=10.0,
         f_hz=cfg.sensor_poly.X,

@@ -4,6 +4,7 @@ from pathlib import Path
 
 import numpy as np
 
+from bslfs.terps.coeff import coeff_from_sensor_poly
 from bslfs.terps.config import SensorPoly, TerpsConfig, load_config
 from bslfs.terps.processing import SamplePipeline
 from bslfs.terps.frames import Frame
@@ -20,7 +21,8 @@ def test_pressure_polynomial_uses_microvolts(tmp_path: Path) -> None:
             [0.0, 0.0],
         ],
     )
-    pipeline = SamplePipeline(cfg)
+    coeff = coeff_from_sensor_poly("test", cfg.sensor_poly)
+    pipeline = SamplePipeline(cfg, coeff)
     frame = Frame(
         ts_ms=0.0,
         f_hz=cfg.sensor_poly.X,

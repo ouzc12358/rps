@@ -1,10 +1,12 @@
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "ads1220.h"
 #include "config_default.h"
 #include "edge_counter.h"
+#include "eeprom_coeff.h"
 #include "hardware/gpio.h"
 #include "hardware/irq.h"
 #include "hardware/spi.h"
@@ -22,9 +24,12 @@ static queue_t *g_freq_queue;
 static queue_t g_frame_queue;
 static bool g_binary_mode = true;
 static int32_t g_last_diode_uV = 0;
+static rps_eeprom_t g_eeprom_cache;
+static bool g_eeprom_valid = false;
 
 static void core1_main(void);
 static void process_frequency_result(const freq_result_t *freq);
+static void handle_cdc_command(const char *line);
 
 static void setup_adc(void)
 {
@@ -90,6 +95,9 @@ int main()
         gpio_set_irq_enabled(g_config.pps_gpio, GPIO_IRQ_EDGE_RISE, true);
     }
     init_usb();
+    if (g_config.unio_gpio != TERPS_GPIO_UNUSED) {
+        rps_eeprom_init(g_config.unio_gpio, g_config.unio_bitrate_bps);
+    }
 
     multicore_launch_core1(core1_main);
 
@@ -103,6 +111,11 @@ int main()
         terps_frame_t frame;
         if (queue_try_remove(&g_frame_queue, &frame)) {
             usb_cdc_send_frame(&frame);
+        }
+
+        char cmd[128];
+        if (usb_cdc_read_line(cmd, sizeof(cmd))) {
+            handle_cdc_command(cmd);
         }
 
         feed_pps_correction();
@@ -169,4 +182,122 @@ static void process_frequency_result(const freq_result_t *freq)
     }
 
     freq_counter_start_window(g_config.mode, g_config.tau_ms);
+}
+
+static void send_hex_block(const uint8_t *data, size_t len)
+{
+    char line[65];
+    size_t pos = 0;
+    for (size_t i = 0; i < len; i++) {
+        int written = snprintf(line + pos, sizeof(line) - pos, "%02X", data[i]);
+        if (written <= 0) {
+            break;
+        }
+        pos += (size_t)written;
+        if (pos >= sizeof(line) - 1 || ((i + 1) % 32) == 0) {
+            line[pos] = '\0';
+            usb_cdc_write_line(line);
+            usb_cdc_write_line("\n");
+            pos = 0;
+        }
+    }
+    if (pos > 0) {
+        line[pos] = '\0';
+        usb_cdc_write_line(line);
+        usb_cdc_write_line("\n");
+    }
+}
+
+static void handle_eeprom_dump(uint16_t addr, size_t length)
+{
+    if (addr >= 0x200) {
+        usb_cdc_write_line("ERR BAD_ADDR\n");
+        usb_cdc_write_line("END\n");
+        return;
+    }
+    size_t max_len = sizeof(g_eeprom_cache.bytes);
+    if (length == 0 || length > max_len) {
+        length = max_len;
+    }
+    size_t remaining = 0x200 - addr;
+    if (length > remaining) {
+        length = remaining;
+    }
+
+    rps_eeprom_status_t status = rps_eeprom_read(&g_eeprom_cache, addr, length);
+    if (status == RPS_EEPROM_NO_DEVICE) {
+        g_eeprom_valid = false;
+        usb_cdc_write_line("ERR UNIO_NO_DEVICE\n");
+        usb_cdc_write_line("END\n");
+        return;
+    }
+    if (status != RPS_EEPROM_OK) {
+        g_eeprom_valid = false;
+        usb_cdc_write_line("ERR EEPROM_IO\n");
+        usb_cdc_write_line("END\n");
+        return;
+    }
+    g_eeprom_valid = true;
+    char header[160];
+    snprintf(header,
+             sizeof(header),
+             "OK DEV=0x%02X START=0x%04X LEN=%u\n",
+             (unsigned)g_eeprom_cache.device_address,
+             (unsigned)g_eeprom_cache.start_addr,
+             (unsigned)g_eeprom_cache.length);
+    usb_cdc_write_line(header);
+    send_hex_block(g_eeprom_cache.bytes, g_eeprom_cache.length);
+    usb_cdc_write_line("END\n");
+}
+
+static void handle_info_dev(void)
+{
+    char line[180];
+    int pos = snprintf(line,
+                       sizeof(line),
+                       "OK FW=terps_pico2 VER=uni_o gpio=%u bitrate=%u mode=%s",
+                       (unsigned)g_config.unio_gpio,
+                       (unsigned)g_config.unio_bitrate_bps,
+                       g_binary_mode ? "binary" : "csv");
+    if (g_eeprom_valid && pos > 0 && (size_t)pos < sizeof(line)) {
+        pos += snprintf(line + pos,
+                        sizeof(line) - (size_t)pos,
+                        " last_dev=0x%02X last_len=%u",
+                        (unsigned)g_eeprom_cache.device_address,
+                        (unsigned)g_eeprom_cache.length);
+    }
+    if (pos >= 0 && (size_t)pos < sizeof(line) - 1) {
+        line[pos++] = '\n';
+        line[pos] = '\0';
+    }
+    usb_cdc_write_line(line);
+    usb_cdc_write_line("END\n");
+}
+
+static void handle_cdc_command(const char *line)
+{
+    if (strncmp(line, "EEPROM.DUMP", 11) == 0) {
+        uint32_t addr = 0;
+        uint32_t length = sizeof(g_eeprom_cache.bytes);
+        int consumed = sscanf(line + 11, "%u %u", &addr, &length);
+        if (consumed <= 0) {
+            addr = 0;
+            length = sizeof(g_eeprom_cache.bytes);
+        } else if (consumed == 1) {
+            length = sizeof(g_eeprom_cache.bytes);
+        }
+        handle_eeprom_dump((uint16_t)(addr & 0xFFFFu), (size_t)length);
+        return;
+    }
+    if (strncmp(line, "EEPROM.PARSE", 12) == 0) {
+        usb_cdc_write_line("ERR UNSUPPORTED\n");
+        usb_cdc_write_line("END\n");
+        return;
+    }
+    if (strncmp(line, "INFO.DEV", 8) == 0) {
+        handle_info_dev();
+        return;
+    }
+    usb_cdc_write_line("ERR UNKNOWN_CMD\n");
+    usb_cdc_write_line("END\n");
 }

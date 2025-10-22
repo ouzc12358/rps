@@ -7,6 +7,7 @@ helpers used by the Raspberry Pi host application. Keeping this logic inside
 introducing a parallel package.
 """
 
+from .coeff import Coeff, CoeffManager, coeff_from_sensor_poly, coeff_metadata
 from .config import AdcConfig, HostRuntime, SensorPoly, TerpsConfig, load_config
 from .frames import Frame, FrameFormat, FrameParser, crc16_ccitt
 from .processing import PressureCalculator, SampleRecord
@@ -18,6 +19,10 @@ __all__ = [
     "SensorPoly",
     "TerpsConfig",
     "load_config",
+    "Coeff",
+    "CoeffManager",
+    "coeff_from_sensor_poly",
+    "coeff_metadata",
     "Frame",
     "FrameFormat",
     "FrameParser",

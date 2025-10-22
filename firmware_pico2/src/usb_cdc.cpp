@@ -1,5 +1,6 @@
 #include "usb_cdc.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -8,6 +9,8 @@
 #include "tusb.h"
 
 static terps_stream_mode_t g_mode = TERPS_STREAM_CSV;
+static char g_cmd_buffer[128];
+static size_t g_cmd_len = 0;
 
 
 static bool ensure_write_capacity(uint32_t needed_bytes, uint32_t timeout_ms)
@@ -131,6 +134,69 @@ bool usb_cdc_send_frame(const terps_frame_t *frame)
     tud_cdc_write(line, (uint32_t)written);
     tud_cdc_write_flush();
     return true;
+}
+
+bool usb_cdc_read_line(char *buffer, size_t max_len)
+{
+    bool line_ready = false;
+    while (tud_cdc_available()) {
+        int ch = tud_cdc_read_char();
+        if (ch < 0) {
+            break;
+        }
+        char c = (char)ch;
+        if (c == '\r') {
+            continue;
+        }
+        if (c == '\n') {
+            if (g_cmd_len > 0) {
+                if (buffer != NULL && max_len > 0) {
+                    size_t copy_len = g_cmd_len < (max_len - 1) ? g_cmd_len : (max_len - 1);
+                    memcpy(buffer, g_cmd_buffer, copy_len);
+                    buffer[copy_len] = '\0';
+                }
+                g_cmd_len = 0;
+                line_ready = true;
+            }
+            continue;
+        }
+        if (g_cmd_len < sizeof(g_cmd_buffer) - 1) {
+            g_cmd_buffer[g_cmd_len++] = c;
+        } else {
+            g_cmd_len = 0;
+        }
+    }
+    return line_ready;
+}
+
+void usb_cdc_write_line(const char *text)
+{
+    if (text == NULL) {
+        return;
+    }
+    size_t len = strlen(text);
+    if (!ensure_write_capacity((uint32_t)len, 100)) {
+        return;
+    }
+    tud_cdc_write(text, (uint32_t)len);
+    tud_cdc_write_flush();
+}
+
+void usb_cdc_printf(const char *fmt, ...)
+{
+    char line[256];
+    va_list args;
+    va_start(args, fmt);
+    int written = vsnprintf(line, sizeof(line), fmt, args);
+    va_end(args);
+    if (written <= 0) {
+        return;
+    }
+    if ((size_t)written >= sizeof(line)) {
+        written = sizeof(line) - 1;
+        line[written] = '\0';
+    }
+    usb_cdc_write_line(line);
 }
 
 void usb_cdc_poll(void)

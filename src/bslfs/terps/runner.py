@@ -5,9 +5,9 @@ import queue
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence
 
 import typer
 
@@ -16,8 +16,19 @@ try:
 except ImportError:  # pragma: no cover - handled in CLI validation
     serial = None  # type: ignore[assignment]
 
+from .coeff import (
+    Coeff,
+    CoeffManager,
+    DefaultConfig,
+    EepromOverCdc,
+    ManualOverride,
+    RPS_EEPROM_SIZE,
+    parse_eeprom_dump,
+    parse_rps_eeprom,
+    save_manual_coeff,
+)
 from .config import TerpsConfig, load_config
-from .frames import Frame, FrameFormat, FrameParser, iterate_binary_stream, iterate_text_stream
+from .frames import Frame, FrameFormat, FrameParser
 from .processing import SamplePipeline
 
 logger = logging.getLogger(__name__)
@@ -72,6 +83,14 @@ class SerialSettings:
     timeout: float = 2.0
 
 
+@dataclass
+class CommandRequest:
+    command: str
+    response: "queue.Queue[List[str]]"
+    timeout: float
+    started: float = field(default=0.0)
+
+
 class SerialReaderThread(threading.Thread):
     def __init__(
         self,
@@ -93,6 +112,10 @@ class SerialReaderThread(threading.Thread):
         self._connected_once = False
         self.last_exception: Optional[Exception] = None
         self._log = logging.getLogger(__name__)
+        self._command_queue: "queue.Queue[CommandRequest]" = queue.Queue()
+        self._active_command: Optional[CommandRequest] = None
+        self._command_buffer: List[str] = []
+        self._ready_event = threading.Event()
 
     def run(self) -> None:  # pragma: no cover - exercised via integration-style tests
         initial_delay = max(self.config.host.reconnect_initial_sec, 0.1)
@@ -111,21 +134,15 @@ class SerialReaderThread(threading.Thread):
                 self.last_exception = None
                 backoff = initial_delay
                 self.parser.reset()
+                self._ready_event.set()
                 if self.frame_format is FrameFormat.CSV:
-                    wrapper = TextWrapper(self._serial_handle)
-                    try:
-                        for frame in self.parser.parse_csv(iterate_text_stream(wrapper)):
-                            if self._stop_event.is_set():
-                                break
-                            self._emit(frame)
-                    finally:
-                        wrapper.close()
+                    for frame in self.parser.parse_csv(self._iter_csv_lines()):
+                        if self._stop_event.is_set():
+                            break
+                        self._emit(frame)
                 else:
                     chunk_size = max(self.config.host.binary_chunk_size, 16)
-                    assert self._serial_handle is not None
-                    for frame in self.parser.parse_binary(
-                        iterate_binary_stream(self._serial_handle, chunk_size=chunk_size)
-                    ):
+                    for frame in self.parser.parse_binary(self._iter_binary_chunks(chunk_size)):
                         if self._stop_event.is_set():
                             break
                         self._emit(frame)
@@ -136,6 +153,9 @@ class SerialReaderThread(threading.Thread):
                 self.last_exception = exc
                 self._log.exception("Unexpected error in serial reader")
             finally:
+                self._ready_event.clear()
+                if self._active_command is not None:
+                    self._complete_command(["ERR DISCONNECTED"])
                 if self._serial_handle is not None:
                     try:
                         self._serial_handle.close()
@@ -170,6 +190,109 @@ class SerialReaderThread(threading.Thread):
             self._dropped += 1
             self._log.warning("Frame queue full (%d), dropping frame", self.queue.qsize())
 
+    def execute_command(self, command: str, timeout: float = 2.0) -> List[str]:
+        if not self._ready_event.wait(timeout):
+            raise TimeoutError("Serial device not ready")
+        response: "queue.Queue[List[str]]" = queue.Queue(maxsize=1)
+        request = CommandRequest(command=command.strip(), response=response, timeout=timeout)
+        self._command_queue.put(request)
+        try:
+            return response.get(timeout=timeout)
+        except queue.Empty as exc:
+            raise TimeoutError(f"Timeout waiting for command '{command}'") from exc
+
+    def wait_ready(self, timeout: float = 2.0) -> bool:
+        return self._ready_event.wait(timeout)
+
+    def _iter_csv_lines(self):
+        while not self._stop_event.is_set():
+            self._process_command_queue()
+            if self._active_command is not None:
+                line = self._readline()
+                if line is None:
+                    continue
+                self._handle_command_line(line)
+                continue
+            line = self._readline()
+            if line is None:
+                continue
+            if self._handle_command_line(line):
+                continue
+            yield line
+
+    def _iter_binary_chunks(self, chunk_size: int):
+        while not self._stop_event.is_set():
+            self._process_command_queue()
+            if self._active_command is not None:
+                line = self._readline()
+                if line is None:
+                    continue
+                self._handle_command_line(line)
+                continue
+            if self._serial_handle is None:
+                time.sleep(0.01)
+                continue
+            data = self._serial_handle.read(chunk_size)
+            if not data:
+                continue
+            yield data
+
+    def _process_command_queue(self) -> None:
+        if self._active_command is not None:
+            if self._active_command.started and (time.monotonic() - self._active_command.started) > self._active_command.timeout:
+                self._complete_command(["ERR TIMEOUT"])
+            return
+        try:
+            request = self._command_queue.get_nowait()
+        except queue.Empty:
+            return
+        if self._serial_handle is None:
+            request.response.put(["ERR NOT_CONNECTED"])
+            return
+        payload = (request.command + "\n").encode("ascii", errors="ignore")
+        try:
+            self._serial_handle.write(payload)
+            self._serial_handle.flush()
+        except Exception as exc:
+            request.response.put([f"ERR WRITE_FAILED {exc}"])
+            return
+        request.started = time.monotonic()
+        self._active_command = request
+        self._command_buffer = []
+
+    def _readline(self) -> Optional[str]:
+        if self._serial_handle is None:
+            return None
+        try:
+            raw = self._serial_handle.readline()
+        except Exception as exc:
+            self._log.debug("readline error: %s", exc)
+            return None
+        if not raw:
+            return None
+        return raw.decode("utf-8", errors="ignore")
+
+    def _handle_command_line(self, line: str) -> bool:
+        if self._active_command is None:
+            return False
+        stripped = line.rstrip("\r\n")
+        if stripped:
+            self._command_buffer.append(stripped)
+        if stripped == "END":
+            self._complete_command(self._command_buffer.copy())
+        return True
+
+    def _complete_command(self, lines: List[str]) -> None:
+        if self._active_command is None:
+            return
+        try:
+            self._active_command.response.put_nowait(lines)
+        except queue.Full:
+            pass
+        finally:
+            self._active_command = None
+            self._command_buffer = []
+
     def _open_serial(self):
         if serial is None:
             raise ImportError("pyserial is required but not installed. Install extra 'terps'.")
@@ -180,17 +303,67 @@ class SerialReaderThread(threading.Thread):
         )
 
 
+class SerialCommandClient:
+    def __init__(self, settings: SerialSettings):
+        if serial is None:
+            raise ImportError("pyserial is required but not installed. Install extra 'terps'.")
+        self._serial = serial.Serial(
+            port=settings.port,
+            baudrate=settings.baudrate,
+            timeout=settings.timeout,
+        )
+        self._timeout = settings.timeout
+
+    def execute(self, command: str, timeout: Optional[float] = None) -> List[str]:
+        deadline = time.monotonic() + (timeout or self._timeout)
+        payload = (command.strip() + "\n").encode("ascii", errors="ignore")
+        self._serial.reset_input_buffer()
+        self._serial.write(payload)
+        self._serial.flush()
+        lines: List[str] = []
+        while time.monotonic() < deadline:
+            raw = self._serial.readline()
+            if not raw:
+                continue
+            decoded = raw.decode("utf-8", errors="ignore").rstrip("\r\n")
+            lines.append(decoded)
+            if decoded == "END":
+                return lines
+        raise TimeoutError(f"Timeout waiting for '{command}' response")
+
+    def close(self) -> None:
+        try:
+            self._serial.close()
+        except Exception:
+            pass
+
+
 class TerpsHost:
     """Host-side orchestrator running on Raspberry Pi."""
 
-    def __init__(self, settings: SerialSettings, config: TerpsConfig, plotter: Optional["LivePlotter"] = None):
+    def __init__(
+        self,
+        settings: SerialSettings,
+        config: TerpsConfig,
+        coeff_mode: str,
+        coeff_refresh_sec: float,
+        manual_override: Optional[ManualOverride] = None,
+        plotter: Optional["LivePlotter"] = None,
+    ):
         self.settings = settings
         self.config = config
         self.frame_format = FrameFormat(config.frame_format_enum)
-        self.pipeline = SamplePipeline(config)
         self.plotter = plotter
+        self._coeff_mode = coeff_mode.lower()
+        self._coeff_refresh_sec = max(coeff_refresh_sec, 1.0)
+        self._manual_override = manual_override or ManualOverride()
+        self._default_provider = DefaultConfig(config)
+        initial_coeff = self._manual_override.get() or self._default_provider.get()
+        self.pipeline = SamplePipeline(config, initial_coeff)
         if self.plotter:
             self.pipeline.register_callback(self.plotter.on_sample)
+        self._coeff_manager: Optional[CoeffManager] = None
+        self._eeprom_provider: Optional[EepromOverCdc] = None
 
     def run(self) -> None:
         if self.settings.port == "-":
@@ -200,6 +373,7 @@ class TerpsHost:
         frame_queue: "queue.Queue[Frame]" = queue.Queue(maxsize=self.config.host.queue_maxsize)
         reader = SerialReaderThread(self.settings, self.frame_format, self.config, frame_queue)
         reader.start()
+        self._setup_coeff_manager(reader)
         processed = 0
         interval_sec = max(float(self.config.host.stats_log_interval), 5.0)
         next_log = time.monotonic() + interval_sec
@@ -225,6 +399,10 @@ class TerpsHost:
                         next_log = time.monotonic() + interval_sec
                     continue
                 self.pipeline.process([frame])
+                if self._coeff_manager is not None:
+                    updated = self._coeff_manager.refresh(time.monotonic())
+                    if updated is not None:
+                        self._apply_coeff(updated)
                 processed += 1
                 if time.monotonic() >= next_log:
                     emit_stats()
@@ -268,30 +446,115 @@ class TerpsHost:
             if self.plotter:
                 self.plotter.close()
 
+    def _setup_coeff_manager(self, reader: SerialReaderThread) -> None:
+        wait_timeout = max(self.settings.timeout, 1.0)
+        reader.wait_ready(wait_timeout)
+        eeprom_provider = None
+        if self._coeff_mode != "manual" and self.frame_format is FrameFormat.CSV:
+            eeprom_provider = EepromOverCdc(reader.execute_command)
+            self._eeprom_provider = eeprom_provider
+        elif self._coeff_mode != "manual" and self.frame_format is FrameFormat.BINARY:
+            logger.warning("Disabling EEPROM refresh while streaming binary frames")
+        self._coeff_manager = CoeffManager(
+            default_provider=self._default_provider,
+            manual_provider=self._manual_override,
+            eeprom_provider=eeprom_provider,
+            mode=self._coeff_mode,
+            refresh_interval=self._coeff_refresh_sec,
+        )
+        self._apply_coeff(self._coeff_manager.current)
 
-class TextWrapper:
-    """Minimal adapter exposing a text iterator from a pyserial device."""
+    def _apply_coeff(self, coeff) -> None:
+        self.pipeline.update_coeff(coeff)
+        if self.plotter and hasattr(self.plotter, "set_coeff_source"):
+            try:
+                self.plotter.set_coeff_source(coeff)
+            except Exception:
+                logger.debug("Plotter does not support coeff updates", exc_info=True)
 
-    def __init__(self, ser):
-        self.ser = ser
 
-    def __iter__(self):
-        return self
+coeff_app = typer.Typer(help="EEPROM coefficient utilities.")
 
-    def __next__(self):
-        line = self.ser.readline()
-        if not line:
-            raise StopIteration
-        return line.decode("utf-8", errors="ignore")
 
-    def close(self) -> None:
-        try:
-            self.ser.close()
-        except Exception:
-            pass
+@coeff_app.command("dump")
+def coeff_dump(
+    port: str = typer.Option("/dev/ttyACM0", "--port", "-p", help="Serial device"),
+    baudrate: int = typer.Option(921600, "--baud", help="Serial baudrate"),
+    timeout: float = typer.Option(2.0, "--timeout", help="Serial timeout (seconds)"),
+    out: Path = typer.Option(Path("rps_eeprom.bin"), "--out", help="Output file for EEPROM blob"),
+):
+    settings = SerialSettings(port=port, baudrate=baudrate, timeout=timeout)
+    client = SerialCommandClient(settings)
+    try:
+        lines = client.execute("EEPROM.DUMP 0 512", timeout=timeout)
+    finally:
+        client.close()
+    blob, header = parse_eeprom_dump(lines)
+    data = blob[:RPS_EEPROM_SIZE]
+    out.write_bytes(data)
+    typer.echo(f"Saved {len(data)} bytes from device {header.get('DEV', '?')} to {out}")
+
+
+@coeff_app.command("parse")
+def coeff_parse(
+    input_path: Path = typer.Option(..., "--in", help="EEPROM binary file", exists=True, readable=True)
+):
+    blob = input_path.read_bytes()
+    if len(blob) < RPS_EEPROM_SIZE:
+        raise typer.BadParameter(f"File must contain at least {RPS_EEPROM_SIZE} bytes")
+    try:
+        coeff = parse_rps_eeprom(blob[:RPS_EEPROM_SIZE], source="file")
+    except ValueError as exc:
+        typer.echo(f"Checksum FAILED: {exc}")
+        raise typer.Exit(code=1) from exc
+    typer.echo("Checksum OK")
+    typer.echo(f"Serial: {coeff.serial or 'n/a'}")
+    typer.echo(f"Unit: {coeff.unit}")
+    typer.echo(f"Order: {coeff.order} (nx={coeff.nx}, ny={coeff.ny})")
+    typer.echo(f"X_ref: {coeff.x_ref:.6f}")
+    typer.echo(f"Y_ref: {coeff.y_ref:.6f}")
+    typer.echo(f"Coefficients: {len(coeff.a)} values")
+
+
+@coeff_app.command("set")
+def coeff_set(
+    out: Path = typer.Option(..., "--out", help="Destination manual JSON"),
+    order: Optional[int] = typer.Option(None, "--order", help="Polynomial order (applies to nx/ny)"),
+    nx: Optional[int] = typer.Option(None, "--nx", help="Frequency axis order"),
+    ny: Optional[int] = typer.Option(None, "--ny", help="Temperature axis order"),
+    x_ref: float = typer.Option(..., "--x-ref", help="Reference frequency"),
+    y_ref: float = typer.Option(..., "--y-ref", help="Reference diode voltage (µV)"),
+    unit: str = typer.Option("Pa", "--unit", help="Pressure unit label"),
+    serial: Optional[str] = typer.Option(None, "--serial", help="Manual serial identifier"),
+    coeffs: List[float] = typer.Argument(..., help="Flattened coefficient matrix (row-major)"),
+):
+    if order is not None:
+        nx_val = ny_val = order
+    else:
+        if nx is None or ny is None:
+            raise typer.BadParameter("Provide --order or both --nx and --ny")
+        nx_val = nx
+        ny_val = ny
+    expected = (nx_val + 1) * (ny_val + 1)
+    if len(coeffs) != expected:
+        raise typer.BadParameter(f"Expected {expected} coefficients, got {len(coeffs)}")
+    coeff = Coeff(
+        order=max(nx_val, ny_val),
+        unit=unit,
+        a=[float(value) for value in coeffs],
+        serial=serial,
+        source="manual",
+        x_ref=x_ref,
+        y_ref=y_ref,
+        nx=nx_val,
+        ny=ny_val,
+    )
+    save_manual_coeff(out, coeff)
+    typer.echo(f"Wrote manual coefficient profile to {out}")
 
 
 app = typer.Typer(add_completion=False, help="TERPS RPS host utilities.")
+app.add_typer(coeff_app, name="coeff")
 
 
 @app.command()
@@ -319,6 +582,21 @@ def run(
         None,
         "--set",
         help="Override config keys, e.g. --set frame_format=binary --set adc.gain=32",
+    ),
+    coeff_source: str = typer.Option(
+        "auto",
+        "--coeff-source",
+        help="Coefficient source priority: auto|manual|config.",
+    ),
+    coeff_refresh_sec: float = typer.Option(
+        60.0,
+        "--coeff-refresh-sec",
+        help="Refresh interval for EEPROM coefficients (seconds).",
+    ),
+    coeff_manual_json: Optional[Path] = typer.Option(
+        None,
+        "--coeff-manual-json",
+        help="Manual coefficient override in JSON format.",
     ),
 ):
     """Run the host pipeline: read frames, compute pressure, persist CSV."""
@@ -358,7 +636,25 @@ def run(
         logger.info("Applied preset %s (tau_ms=%.1f, adc_gain=%d, rate_sps=%d)",
                     preset.lower(), cfg.tau_ms, cfg.adc.gain, cfg.adc.rate_sps)
     settings = SerialSettings(port=port, baudrate=baudrate, timeout=timeout)
-    host = TerpsHost(settings=settings, config=cfg, plotter=plotter)
+    coeff_mode = coeff_source.lower()
+    if coeff_mode not in {"auto", "manual", "config"}:
+        raise typer.BadParameter("--coeff-source must be one of auto, manual, config")
+    manual_override = None
+    if coeff_manual_json is not None:
+        try:
+            manual_override = ManualOverride.load(coeff_manual_json)
+        except Exception as exc:  # pragma: no cover - user input validation
+            raise typer.BadParameter(f"Failed to load manual coefficient JSON: {exc}") from exc
+    if coeff_mode == "manual" and manual_override is None:
+        raise typer.BadParameter("--coeff-manual-json is required when --coeff-source=manual")
+    host = TerpsHost(
+        settings=settings,
+        config=cfg,
+        coeff_mode=coeff_mode,
+        coeff_refresh_sec=coeff_refresh_sec,
+        manual_override=manual_override,
+        plotter=plotter,
+    )
     try:
         host.run()
     except KeyboardInterrupt:

@@ -40,6 +40,8 @@ typedef struct {
     uint32_t spi_miso_gpio;
     uint32_t adc_timeout_ms;
     bool debug_deglitch_stats;
+    uint32_t unio_gpio;
+    uint32_t unio_bitrate_bps;
 } terps_firmware_config_t;
 
 extern const terps_firmware_config_t terps_default_config;

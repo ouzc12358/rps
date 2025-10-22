@@ -78,6 +78,15 @@ class LivePlotter:
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 
+    def set_coeff_source(self, coeff) -> None:
+        label = getattr(coeff, "source", "unknown")
+        serial = getattr(coeff, "serial", None)
+        if serial:
+            label = f"{label}:{serial}"
+        with self._lock:
+            self.ax_freq.set_xlabel(f"Time (s) — coeff={label}")
+            self.ax_diode.set_xlabel(f"Time (s) — coeff={label}")
+
     def _loop(self) -> None:  # pragma: no cover - GUI loop
         plt.show(block=False)
         while self._running:
@@ -186,4 +195,3 @@ class LivePlotter:
         thread = getattr(self, "_thread", None)
         if thread and thread.is_alive():
             thread.join(timeout=1.0)
-

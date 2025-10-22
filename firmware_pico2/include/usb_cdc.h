@@ -29,6 +29,9 @@ typedef enum {
 void usb_cdc_init(terps_stream_mode_t mode);
 void usb_cdc_set_mode(terps_stream_mode_t mode);
 bool usb_cdc_send_frame(const terps_frame_t *frame);
+bool usb_cdc_read_line(char *buffer, size_t max_len);
+void usb_cdc_write_line(const char *text);
+void usb_cdc_printf(const char *fmt, ...);
 void usb_cdc_poll(void);
 
 #ifdef __cplusplus
